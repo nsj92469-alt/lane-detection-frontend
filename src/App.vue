@@ -4,8 +4,8 @@
       <div class="brand-container">
         <div class="logo-box">🔬</div>
         <div class="brand-text">
-          <h1>LaneDet System</h1>
-          <span class="version-tag">Thesis Demo v2.0</span>
+          <h1>车道线智能检测系统</h1>
+          <span class="version-tag">毕业论文演示版 v2.0</span>
         </div>
       </div>
 
@@ -20,12 +20,12 @@
       <aside class="sidebar-left modern-card">
         <div class="card-header">
           <h2>控制面板</h2>
-          <p class="subtitle">Control Panel</p>
+          <p class="subtitle">操作配置</p>
         </div>
 
         <div class="card-body">
           <div class="form-group">
-            <label class="form-label">输入模式 / Input Mode</label>
+            <label class="form-label">输入模式</label>
             <div class="segment-control">
               <button v-for="mode in ['local', 'stream']" :key="mode"
                 :class="['segment-btn', inputMode === mode ? 'active' : '']" @click="switchMode(mode)">
@@ -35,7 +35,7 @@
           </div>
 
           <div class="form-group">
-            <label class="form-label">检测网络 / Network</label>
+            <label class="form-label">检测模型</label>
             <div class="select-wrapper">
               <select v-model="selectedModel" class="select-modern">
                 <option value="CLRNet">CLRNet (ResNet-101)</option>
@@ -45,13 +45,14 @@
           </div>
 
           <div class="form-group input-area">
-            <label class="form-label">数据源 / Source</label>
+            <label class="form-label">数据源</label>
 
             <div v-if="inputMode === 'local'" class="upload-zone" :class="{ 'has-file': fileName }">
-              <input type="file" id="file-upload" @change="handleFileUpload" accept="image/*,video/*" hidden>
+              <input type="file" id="file-upload" @change="handleFileUpload" accept="image/*" :disabled="isDetecting"
+                hidden>
               <label for="file-upload" class="upload-label">
                 <span class="icon">{{ fileName ? '✅' : '☁️' }}</span>
-                <span class="text">{{ fileName || '点击选择图片/视频' }}</span>
+                <span class="text">{{ fileName || '点击上传图片' }}</span>
               </label>
             </div>
 
@@ -63,9 +64,10 @@
 
           <div class="action-area">
             <button @click="toggleInference" :class="['btn-primary', isDetecting ? 'btn-stop' : '']"
-              :disabled="inputMode === 'local' && !imageSrc">
-              <span v-if="isDetecting">⏹ 停止推理 (Stop)</span>
-              <span v-else>▶ 开始检测 (Start)</span>
+              :disabled="(inputMode === 'local' && !currentFile) || isLoading">
+              <span v-if="isLoading">⏳ 处理中...</span>
+              <span v-else-if="isDetecting">⏹ 重置 / 停止</span>
+              <span v-else>▶ 开始检测</span>
             </button>
           </div>
         </div>
@@ -73,15 +75,15 @@
 
       <section class="stage-center modern-card">
         <div class="stage-header">
-          <div class="stage-title">可视化视图 / Visualization</div>
+          <div class="stage-title">可视化结果</div>
           <div class="stage-meta">
-            <span class="meta-tag">RES: {{ imageResolution }}</span>
-            <span class="meta-tag">FPS: {{ fps }}</span>
+            <span class="meta-tag">分辨率: {{ imageResolution }}</span>
+            <span class="meta-tag" v-if="realLaneCount !== null">车道数: {{ realLaneCount }}</span>
           </div>
         </div>
 
         <div class="canvas-viewport">
-          <LaneCanvas ref="laneCanvasRef" :imageSrc="imageSrc" :isDetecting="isDetecting" :inputMode="inputMode"
+          <LaneCanvas ref="laneCanvasRef" :imageSrc="displayImage" :isDetecting="isDetecting" :inputMode="inputMode"
             :modelName="selectedModel" />
         </div>
       </section>
@@ -89,25 +91,27 @@
       <aside class="sidebar-right modern-card">
         <div class="card-header">
           <h2>系统日志</h2>
-          <p class="subtitle">System Logs</p>
+          <p class="subtitle">运行状态监控</p>
         </div>
 
-        <div class="terminal-window">
+        <div class="terminal-window" ref="logWindow">
           <div v-for="(log, idx) in logs" :key="idx" class="log-line">
             <span class="log-time">[{{ log.time }}]</span>
-            <span class="log-msg">{{ log.msg }}</span>
+            <span class="log-msg" :class="log.type">{{ log.msg }}</span>
           </div>
-          <div v-if="logs.length === 0" class="log-empty">System Ready...</div>
+          <div v-if="logs.length === 0" class="log-empty">系统已就绪...</div>
         </div>
 
         <div class="metrics-panel">
           <div class="metric-item">
-            <div class="label">Latency</div>
-            <div class="value">{{ isDetecting ? '32ms' : '--' }}</div>
+            <div class="label">当前状态</div>
+            <div class="value" :style="{ color: isDetecting ? '#10B981' : '#64748B' }">
+              {{ isDetecting ? '检测完成' : '待机' }}
+            </div>
           </div>
           <div class="metric-item">
-            <div class="label">Confidence</div>
-            <div class="value">{{ isDetecting ? '0.98' : '--' }}</div>
+            <div class="label">识别车道数</div>
+            <div class="value">{{ realLaneCount !== null ? realLaneCount : '--' }}</div>
           </div>
         </div>
       </aside>
@@ -117,112 +121,174 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, nextTick } from 'vue'
 import LaneCanvas from './components/LaneCanvas.vue'
 
-// --- 逻辑与之前保持完全一致，仅复用代码 ---
+// 配置：后端 Django 地址 (确保 Django 已启动并配置了 CORS)
+const API_BASE_URL = 'http://127.0.0.1:8000'
+
+// 状态
 const inputMode = ref('local')
-const selectedModel = ref('CLRNet')
-const isDetecting = ref(false)
-const imageSrc = ref('')
+const selectedModel = ref('B-RESA')
+const isDetecting = ref(false) // 是否处于检测完成状态
+const isLoading = ref(false)   // 是否正在请求接口
+const displayImage = ref('')   // 当前显示的图片URL (可能是本地预览，也可能是后端结果)
 const fileName = ref('')
 const logs = ref([])
-const fps = ref(0)
 const laneCanvasRef = ref(null)
-let wsInterval = null
-let frameCount = 0
+const logWindow = ref(null)
+const currentFile = ref(null)  // 保存原始文件对象用于上传
+const realLaneCount = ref(null)
 
 // 计算属性
 const connectionStatus = computed(() => {
-  if (inputMode.value === 'local') return { text: 'Local Mode', class: 'status-gray' }
-  if (isDetecting.value) return { text: 'Online', class: 'status-green' }
-  return { text: 'Standby', class: 'status-orange' }
+  if (isLoading.value) return { text: '处理中...', class: 'status-orange' }
+  if (isDetecting.value) return { text: '已完成', class: 'status-green' }
+  return { text: '就绪', class: 'status-gray' }
 })
-const imageResolution = computed(() => imageSrc.value ? 'Adaptive' : 'N/A')
+
+const imageResolution = computed(() => displayImage.value ? '自适应' : '无')
 
 // 方法
 const switchMode = (mode) => {
   inputMode.value = mode
-  isDetecting.value = false
-  clearInterval(wsInterval)
+  resetState()
   if (mode === 'stream') {
-    imageSrc.value = ''
-    fileName.value = ''
-    addLog('System switched to Stream Mode')
+    addLog('系统已切换至流媒体模式 (演示)', 'info')
   } else {
-    addLog('System switched to Local Mode')
+    addLog('系统已切换至本地文件模式', 'info')
   }
+}
+
+const resetState = () => {
+  isDetecting.value = false
+  isLoading.value = false
+  displayImage.value = ''
+  fileName.value = ''
+  currentFile.value = null
+  realLaneCount.value = null
 }
 
 const handleFileUpload = (event) => {
   const file = event.target.files[0]
   if (!file) return
-  if (imageSrc.value) URL.revokeObjectURL(imageSrc.value)
-  imageSrc.value = URL.createObjectURL(file)
+
+  // 1. 本地预览
+  if (displayImage.value) URL.revokeObjectURL(displayImage.value)
+  displayImage.value = URL.createObjectURL(file)
+
+  // 2. 保存文件对象
   fileName.value = file.name
+  currentFile.value = file
+
+  // 3. 重置状态
   isDetecting.value = false
-  addLog(`Loaded: ${file.name}`)
+  realLaneCount.value = null
+  addLog(`已加载文件: ${file.name}`, 'info')
 }
 
 const toggleInference = () => {
-  if (inputMode.value === 'local' && !imageSrc.value) return
-  isDetecting.value = !isDetecting.value
-
+  // 如果正在检测，则视为重置
   if (isDetecting.value) {
-    if (inputMode.value === 'stream') startSimulatedStream()
-    else addLog(`Starting inference on ${selectedModel.value}...`)
+    resetState()
+    addLog('状态已重置。', 'info')
+    return
+  }
+
+  // 开始检测流程
+  if (inputMode.value === 'local') {
+    if (!currentFile.value) {
+      addLog('错误：未选择图片文件。', 'error')
+      return
+    }
+    runLocalInference()
   } else {
-    stopStream()
-    addLog('Inference stopped by user')
+    addLog('演示版本暂未实现流媒体模式推理。', 'warning')
   }
 }
 
-const startSimulatedStream = () => {
-  addLog('Connecting to WebSocket...')
-  setTimeout(() => {
-    addLog('Connection established.')
-    wsInterval = setInterval(() => {
-      fps.value = 28 + Math.floor(Math.random() * 5)
-      if (laneCanvasRef.value) laneCanvasRef.value.triggerRenderFromStream()
-      frameCount++
-      if (frameCount % 20 === 0) addLog(`Processing Frame #${frameCount}`)
-    }, 100)
-  }, 500)
+// 🚀 核心：调用 Django 后端接口
+const runLocalInference = async () => {
+  isLoading.value = true
+  addLog(`正在将 ${fileName.value} 发送至 Django 后端...`, 'info')
+
+  const formData = new FormData()
+  formData.append('image', currentFile.value) // 对应 Django request.FILES.get('image')
+
+  try {
+    // ⚠️ [修复点] 去掉末尾的斜杠，匹配 Django urls.py 中的 path('detection', ...)
+    const response = await fetch(`${API_BASE_URL}/detection`, {
+      method: 'POST',
+      body: formData
+    })
+
+    if (!response.ok) {
+      throw new Error(`HTTP 错误: ${response.status}`)
+    }
+
+    const resJson = await response.json()
+
+    // 兼容 Django 返回的不同 code 格式
+    if (resJson.img_url || (resJson.code === 200)) {
+      // 成功：处理返回数据
+
+      // 1. 提取数据 (兼容两种返回结构)
+      const resultUrl = resJson.img_url ? `${API_BASE_URL}/${resJson.img_url}` : `${API_BASE_URL}/${resJson.data.img_url}`
+      const laneCount = resJson.alarms ? resJson.alarms[0].count : (resJson.data ? resJson.data.lane_count : '?')
+
+      displayImage.value = resultUrl
+      realLaneCount.value = laneCount
+
+      isDetecting.value = true
+      addLog(`✅ 成功！检测到 ${laneCount} 条车道线。`, 'success')
+      addLog(`可视化结果已加载。`, 'success')
+    } else {
+      // 失败
+      throw new Error(resJson.message || resJson.error || '未知错误')
+    }
+
+  } catch (error) {
+    console.error(error)
+    addLog(`❌ 推理失败: ${error.message}`, 'error')
+    alert('后端连接失败！请检查 Django 控制台是否报错。')
+  } finally {
+    isLoading.value = false
+  }
 }
 
-const stopStream = () => {
-  clearInterval(wsInterval)
-  fps.value = 0
-  addLog('Connection closed')
-}
-
-const addLog = (msg) => {
+const addLog = (msg, type = 'normal') => {
   const now = new Date()
-  const timeStr = `${now.getHours()}:${now.getMinutes()}:${now.getSeconds()}`
-  logs.value.unshift({ time: timeStr, msg })
+  const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`
+  logs.value.unshift({ time: timeStr, msg, type })
   if (logs.value.length > 50) logs.value.pop()
+
+  // 自动滚动 (虽然是 unshift，但保持习惯)
+  nextTick(() => {
+    if (logWindow.value) logWindow.value.scrollTop = 0
+  })
 }
 </script>
 
 <style scoped>
-/* 页面布局 CSS - 仅仅是布局，样式引用 style.css */
+/* 保持原有布局样式，增加少许状态颜色 */
 .app-layout {
   display: flex;
   flex-direction: column;
   height: 100vh;
   padding: 0;
+  color: var(--text-main);
 }
 
 /* 1. Navbar */
 .navbar {
   height: 64px;
-  background: var(--bg-surface);
-  border-bottom: 1px solid var(--border-light);
+  background: #ffffff;
+  border-bottom: 1px solid #e2e8f0;
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 0 24px;
-  box-shadow: var(--shadow-sm);
+  box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
   z-index: 10;
 }
 
@@ -240,12 +306,12 @@ const addLog = (msg) => {
   margin: 0;
   font-size: 1.2rem;
   font-weight: 700;
-  color: var(--text-main);
+  color: #1e293b;
 }
 
 .version-tag {
-  background: var(--primary-light);
-  color: var(--primary-color);
+  background: #dbeafe;
+  color: #1d4ed8;
   padding: 2px 8px;
   border-radius: 12px;
   font-size: 0.75rem;
@@ -284,45 +350,54 @@ const addLog = (msg) => {
   color: #92400E;
 }
 
-/* 2. Workspace Layout */
+/* 2. Workspace */
 .workspace {
   flex: 1;
   display: flex;
   gap: 20px;
-  /* 卡片间距 */
   padding: 20px;
-  background: var(--bg-page);
+  background: #f8fafc;
   overflow: hidden;
 }
 
-/* Sidebars */
 .sidebar-left {
   width: 300px;
   padding: 0;
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
 }
 
 .sidebar-right {
   width: 280px;
   padding: 0;
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
 }
 
 .card-header {
   padding: 20px;
-  border-bottom: 1px solid var(--border-light);
+  border-bottom: 1px solid #e2e8f0;
   background: #fff;
+  border-radius: 8px 8px 0 0;
 }
 
 .card-header h2 {
   margin: 0;
   font-size: 1rem;
   font-weight: 700;
-  color: var(--text-main);
+  color: #1e293b;
 }
 
 .subtitle {
   margin: 4px 0 0;
   font-size: 0.8rem;
-  color: var(--text-sub);
+  color: #64748b;
 }
 
 .card-body {
@@ -333,7 +408,19 @@ const addLog = (msg) => {
   overflow-y: auto;
 }
 
-/* Segment Control */
+/* Controls */
+.form-group {
+  margin-bottom: 20px;
+}
+
+.form-label {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #475569;
+}
+
 .segment-control {
   display: flex;
   background: #F1F5F9;
@@ -347,7 +434,7 @@ const addLog = (msg) => {
   background: transparent;
   padding: 8px;
   font-size: 0.85rem;
-  color: var(--text-sub);
+  color: #64748b;
   border-radius: 6px;
   cursor: pointer;
   transition: all 0.2s;
@@ -356,27 +443,37 @@ const addLog = (msg) => {
 
 .segment-btn.active {
   background: #fff;
-  color: var(--primary-color);
+  color: #2563eb;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
   font-weight: 700;
 }
 
-/* Upload Zone */
+.select-modern {
+  width: 100%;
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid #cbd5e1;
+  background: #fff;
+  color: #334155;
+}
+
+/* Upload */
 .upload-zone {
-  border: 2px dashed var(--border-light);
-  border-radius: var(--radius-md);
+  border: 2px dashed #cbd5e1;
+  border-radius: 8px;
   text-align: center;
   transition: all 0.2s;
+  cursor: pointer;
 }
 
 .upload-zone:hover {
-  border-color: var(--primary-color);
-  background: var(--primary-light);
+  border-color: #2563eb;
+  background: #eff6ff;
 }
 
 .upload-zone.has-file {
-  border-color: var(--success);
-  background: #F0FDF4;
+  border-color: #10b981;
+  background: #f0fdf4;
 }
 
 .upload-label {
@@ -393,31 +490,7 @@ const addLog = (msg) => {
 
 .upload-label .text {
   font-size: 0.85rem;
-  color: var(--text-sub);
-}
-
-.stream-badge {
-  background: #EFF6FF;
-  border: 1px solid #BFDBFE;
-  color: #1E40AF;
-  padding: 15px;
-  border-radius: 8px;
-  text-align: center;
-}
-
-.stream-badge .protocol {
-  font-weight: bold;
-  background: #2563EB;
-  color: white;
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-size: 0.7rem;
-  margin-right: 8px;
-}
-
-.stream-badge .address {
-  font-family: var(--font-mono);
-  font-size: 0.85rem;
+  color: #64748b;
 }
 
 .action-area {
@@ -425,19 +498,48 @@ const addLog = (msg) => {
   padding-top: 20px;
 }
 
-/* Center Stage */
+.btn-primary {
+  width: 100%;
+  padding: 12px;
+  border: none;
+  border-radius: 8px;
+  background: #2563eb;
+  color: white;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.btn-primary:hover {
+  background: #1d4ed8;
+}
+
+.btn-primary:disabled {
+  background: #94a3b8;
+  cursor: not-allowed;
+}
+
+.btn-stop {
+  background: #ef4444;
+}
+
+.btn-stop:hover {
+  background: #dc2626;
+}
+
+/* Stage */
 .stage-center {
   flex: 1;
   display: flex;
   flex-direction: column;
   background: #000;
-  border: none;
+  border-radius: 8px;
+  overflow: hidden;
 }
 
-/* Canvas 背景改黑 */
 .stage-header {
   padding: 12px 20px;
-  background: #1E1E1E;
+  background: #1e1e1e;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -457,7 +559,7 @@ const addLog = (msg) => {
   padding: 2px 8px;
   border-radius: 4px;
   margin-left: 8px;
-  font-family: var(--font-mono);
+  font-family: monospace;
 }
 
 .canvas-viewport {
@@ -465,17 +567,20 @@ const addLog = (msg) => {
   position: relative;
   overflow: hidden;
   background: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
-/* Logs Terminal */
+/* Logs */
 .terminal-window {
   flex: 1;
-  background: var(--bg-terminal);
+  background: #0f172a;
   padding: 15px;
   overflow-y: auto;
-  font-family: var(--font-mono);
+  font-family: monospace;
   font-size: 0.8rem;
-  border-bottom: 1px solid var(--border-light);
+  border-bottom: 1px solid #e2e8f0;
 }
 
 .log-line {
@@ -484,20 +589,30 @@ const addLog = (msg) => {
 }
 
 .log-time {
-  color: #64748B;
+  color: #64748b;
   margin-right: 10px;
   flex-shrink: 0;
 }
 
 .log-msg {
-  color: #10B981;
+  color: #e2e8f0;
   word-break: break-all;
 }
 
-.log-empty {
-  color: #475569;
-  text-align: center;
-  margin-top: 20px;
+.log-msg.error {
+  color: #ef4444;
+}
+
+.log-msg.success {
+  color: #10b981;
+}
+
+.log-msg.warning {
+  color: #f59e0b;
+}
+
+.log-msg.info {
+  color: #3b82f6;
 }
 
 .metrics-panel {
@@ -505,20 +620,21 @@ const addLog = (msg) => {
   background: #fff;
   display: flex;
   gap: 15px;
+  border-radius: 0 0 8px 8px;
 }
 
 .metric-item {
   flex: 1;
-  background: #F8FAFC;
+  background: #f8fafc;
   padding: 12px;
   border-radius: 8px;
   text-align: center;
-  border: 1px solid var(--border-light);
+  border: 1px solid #e2e8f0;
 }
 
 .metric-item .label {
   font-size: 0.75rem;
-  color: var(--text-sub);
+  color: #64748b;
   margin-bottom: 4px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -527,7 +643,7 @@ const addLog = (msg) => {
 .metric-item .value {
   font-size: 1.25rem;
   font-weight: 700;
-  color: var(--primary-color);
-  font-family: var(--font-mono);
+  color: #0f172a;
+  font-family: monospace;
 }
 </style>
