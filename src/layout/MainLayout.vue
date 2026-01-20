@@ -4,8 +4,8 @@
       <div class="brand-container">
         <div class="logo-box">🔬</div>
         <div class="brand-text">
-          <h1>LaneDet System</h1>
-          <span class="version-tag">Pro v2.0</span>
+          <h1>车道检测系统</h1>
+          <span class="version-tag">Pro v1.0</span>
         </div>
       </div>
 
