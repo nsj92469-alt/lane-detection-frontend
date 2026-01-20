@@ -22,8 +22,8 @@
           <label class="form-label">检测模型</label>
           <div class="select-wrapper">
             <select v-model="selectedModel" class="select-modern">
-              <option value="CLRNet">CLRNet (ResNet/DLA)</option>
-              <option value="B-RESA">B-RESA (ResNet)</option>
+              <option value="CLRNet">CLRNet</option>
+              <option value="B-RESA">B-RESA</option>
             </select>
           </div>
         </div>
@@ -245,6 +245,13 @@ const runLocalInference = async () => {
   const formData = new FormData()
   formData.append('file', currentFile.value)
   formData.append('model_name', selectedModel.value)
+  formData.append('backbone', config.value.backbone);
+
+  // 界面上拖动滑块设定的置信度
+  formData.append('conf_threshold', config.value.conf_threshold);
+
+  // 界面上拖动滑块设定的 NMS 阈值
+  formData.append('nms_threshold', config.value.nms_threshold);
 
   try {
     // 2. ✅ 使用 request 替代 fetch
