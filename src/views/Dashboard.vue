@@ -45,6 +45,7 @@
 <script setup>
 import { ref, onMounted, computed } from 'vue'
 import * as echarts from 'echarts'
+import request from '../utils/request'
 
 const list = ref([])
 const pieChartRef = ref(null)
@@ -74,12 +75,17 @@ const avgLanes = computed(() => {
 // 初始化数据
 const fetchData = async () => {
   try {
-    const res = await fetch('/get_data?page=1&limit=100')
-    const json = await res.json()
-    if (json.data) {
-      list.value = json.data
-      // 必须等待 DOM 更新后再渲染图表
+    const response = await request('/api/history/list?skip=0&limit=100')
+
+    // FastAPI 直接返回数组，或者根据你的封装返回结构
+    // 假设后端返回的是列表: [ {id:1, ...}, ... ]
+    const data = await response.json()
+
+    if (Array.isArray(data)) {
+      list.value = data
       setTimeout(initCharts, 100)
+    } else {
+      console.error('数据格式错误:', data)
     }
   } catch (err) {
     console.error('Fetch failed', err)

@@ -46,7 +46,7 @@ const form = ref({ username: '', password: '', confirmPassword: '' })
 // ⚠️ 猜测后端注册接口位置，如果后端 index/urls.py 里写的是 path('register', ...)
 // 这里可能需要改为 '/register' 或者 '/user/register'
 // 根据 Login 使用 /user/login_check，这里尝试调用 /user/register
-const REGISTER_API = '/user/register'
+const REGISTER_API = '/api/auth/register'
 
 const handleRegister = async () => {
   if (form.value.password !== form.value.confirmPassword) {
@@ -63,24 +63,21 @@ const handleRegister = async () => {
   try {
     const res = await fetch(REGISTER_API, {
       method: 'POST',
-      body: formData
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username: form.value.username,
+        password: form.value.password
+      })
     })
 
-    const data = await res.json()
-
-    // 兼容后端不同的成功返回格式
-    if (res.ok && (data.code === 200 || data.code === 0 || data.success)) {
+    if (res.ok) {
       alert('注册成功！请登录。')
       router.push('/login')
     } else {
-      alert(data.msg || data.message || '注册失败，用户名可能已存在')
+      const err = await res.json()
+      alert(err.detail || '注册失败')
     }
-  } catch (err) {
-    console.error(err)
-    alert('注册请求失败，请检查网络或后端接口')
-  } finally {
-    isLoading.value = false
-  }
+  } catch (e) {  }
 }
 </script>
 

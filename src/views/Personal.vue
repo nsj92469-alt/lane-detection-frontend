@@ -66,22 +66,14 @@ onMounted(() => {
 const handleLogout = async () => {
   if (!confirm('确定要退出登录吗？')) return
 
-  try {
-    // 调用后端注销接口 (假设是 /login_out)
-    await fetch('/login_out', { method: 'GET' }) // 或者是 /logout，视 urls.py 而定
+  // ✅ 修改: 直接清理本地存储，不需要请求后端 (除非你有黑名单机制)
+  localStorage.removeItem('token')
+  localStorage.removeItem('username')
 
-    // 清理本地状态
-    localStorage.removeItem('username')
-    toast.success('已安全退出')
-
-    setTimeout(() => {
-      router.push('/login')
-    }, 500)
-  } catch (e) {
-    // 即使后端报错，前端也强制退出
-    localStorage.removeItem('username')
+  toast.success('已安全退出')
+  setTimeout(() => {
     router.push('/login')
-  }
+  }, 500)
 }
 </script>
 

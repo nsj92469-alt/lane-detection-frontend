@@ -56,22 +56,23 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
+import request from '../utils/request'
 
 const list = ref([])
 const loading = ref(false)
 const page = ref(1)
 const limit = 10
 
+// src/views/History.vue (Script 部分)
+
 const fetchData = async () => {
   loading.value = true
   try {
-    // 代理转发到 http://127.0.0.1:8000/get_data
-    const res = await fetch(`/get_data?page=${page.value}&limit=${limit}`)
-    const json = await res.json()
-
-    // 适配后端返回格式 { code: 0, data: [], count: 100 }
-    if (json.code === 0 || json.data) {
-      list.value = json.data || []
+    // ✅ 修改 1: 接口地址
+    const response = await request(`/api/history/list?skip=${(page.value - 1) * limit}&limit=${limit}`)
+    const data = await response.json()
+    if (Array.isArray(data)) {
+      list.value = data
     }
   } catch (err) {
     console.error(err)
@@ -84,17 +85,12 @@ const fetchData = async () => {
 const handleDelete = async (id) => {
   if (!confirm('确定删除该记录吗？')) return
 
-  const formData = new FormData()
-  formData.append('id', id)
-
   try {
-    const res = await fetch('/del_data', {
-      method: 'POST',
-      body: formData
-    })
-    const json = await res.json()
-    if (json.message || json.msg === '删除成功！') {
-      fetchData() // 刷新列表
+    
+    const response = await request(`/api/history/${id}`, { method: 'DELETE' })
+
+    if (response.ok) {
+      fetchData() // 刷新
     } else {
       alert('删除失败')
     }

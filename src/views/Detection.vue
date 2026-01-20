@@ -132,6 +132,7 @@
 <script setup>
 import { ref, computed, nextTick, watch } from 'vue' // ✅ 引入 watch
 import LaneCanvas from '../components/LaneCanvas.vue'
+import request from '../utils/request'
 
 const API_BASE_URL = 'http://127.0.0.1:8000'
 
@@ -242,32 +243,24 @@ const runLocalInference = async () => {
   addLog(`正在将 ${fileName.value} 发送至 FastAPI 后端...`, 'info')
 
   const formData = new FormData()
-  // ⚠️ 关键修正：FastAPI 的 UploadFile 参数名在 lane.py 中定义为 "file"，不是 "image"
   formData.append('file', currentFile.value)
-
-  // ➕ 新增：传递当前选中的模型参数
   formData.append('model_name', selectedModel.value)
 
   try {
-    // ⚠️ 关键修正：路径改为 FastAPI 的规范路径 /api/lane/detect/image
-    const response = await fetch(`${API_BASE_URL}/api/lane/detect/image`, {
+    // 2. ✅ 使用 request 替代 fetch
+    // 不需要手动加 headers，request 内部会自动加 Token
+    const response = await request('/api/lane/detect/image', {
       method: 'POST',
-      // 注意：fetch 会自动设置 Content-Type 为 multipart/form-data，不要手动设置 headers
-      headers: {
-        // 如果后端开启了 JWT 鉴权，这里可能以后需要加 Authorization
-        // 'Authorization': `Bearer ${token}` 
-      },
       body: formData
     })
 
     if (!response.ok) {
-      // 尝试读取后端返回的详细错误信息
       const errorData = await response.json().catch(() => ({}))
       throw new Error(errorData.detail || `HTTP 错误: ${response.status}`)
     }
 
     const resJson = await response.json()
-
+    // ... (后续处理逻辑完全不用变)
     if (resJson.code === 200) {
       // 成功：处理返回数据
       const resultData = resJson.data
@@ -555,7 +548,7 @@ const addLog = (msg, type = 'normal') => {
 /* Logs */
 .terminal-window {
   flex: 1;
-  background: #0f172a;
+  background: #ffffff;
   padding: 15px;
   overflow-y: auto;
   font-family: monospace;
