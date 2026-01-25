@@ -11,9 +11,9 @@
         <div class="form-group">
           <label class="form-label">输入模式</label>
           <div class="segment-control">
-            <button v-for="mode in ['local', 'stream']" :key="mode"
+            <button v-for="mode in ['local', 'video']" :key="mode"
               :class="['segment-btn', inputMode === mode ? 'active' : '']" @click="switchMode(mode)">
-              {{ mode === 'local' ? '📁 本地文件' : '📹 实时视频流' }}
+              {{ mode === 'local' ? '📁 图片' : '🎬 视频文件' }}
             </button>
           </div>
         </div>
@@ -66,17 +66,21 @@
             </label>
           </div>
 
-          <div v-else class="stream-badge">
-            <span class="protocol">WS</span>
-            <span class="address">ws://localhost:8000/stream</span>
+          <div v-else class="upload-zone" :class="{ 'has-file': videoFileName }">
+            <input type="file" id="video-upload" @change="handleVideoUpload" accept="video/mp4,video/webm"
+              :disabled="isDetecting" hidden>
+            <label for="video-upload" class="upload-label">
+              <span class="icon">{{ videoFileName ? '🎬' : '🎞️' }}</span>
+              <span class="text">{{ videoFileName || '点击上传视频 (MP4)' }}</span>
+            </label>
           </div>
         </div>
 
         <div class="action-area">
           <button @click="toggleInference" :class="['btn-primary', isDetecting ? 'btn-stop' : '']"
-            :disabled="(inputMode === 'local' && !currentFile) || isLoading">
-            <span v-if="isLoading">⏳ 处理中...</span>
-            <span v-else-if="isDetecting">⏹ 重置 / 停止</span>
+            :disabled="shouldDisableStartButton">
+            <span v-if="isLoading">⏳ 初始化中...</span>
+            <span v-else-if="isDetecting">⏹ 停止检测</span>
             <span v-else>▶ 开始检测</span>
           </button>
         </div>
@@ -88,13 +92,19 @@
         <div class="stage-title">可视化结果</div>
         <div class="stage-meta">
           <span class="meta-tag">分辨率: {{ imageResolution }}</span>
+          <span class="meta-tag" v-if="inputMode === 'video' && fps > 0">FPS: {{ fps }}</span>
           <span class="meta-tag" v-if="realLaneCount !== null">车道数: {{ realLaneCount }}</span>
         </div>
       </div>
 
       <div class="canvas-viewport">
-        <LaneCanvas ref="laneCanvasRef" :imageSrc="displayImage" :isDetecting="isDetecting" :inputMode="inputMode"
-          :modelName="selectedModel" />
+        <LaneCanvas v-show="!showVideoPreview" ref="laneCanvasRef" :imageSrc="displayImage" :isDetecting="isDetecting"
+          :inputMode="inputMode" :modelName="selectedModel" />
+
+        <video ref="videoElement" :class="showVideoPreview ? 'video-preview' : 'offscreen-stream'" autoplay playsinline
+          muted loop></video>
+
+        <canvas ref="captureCanvas" class="offscreen-stream"></canvas>
       </div>
     </section>
 
@@ -116,7 +126,7 @@
         <div class="metric-item">
           <div class="label">当前状态</div>
           <div class="value" :style="{ color: isDetecting ? '#10B981' : '#64748B' }">
-            {{ isDetecting ? '检测完成' : '待机' }}
+            {{ isDetecting ? '检测中' : '待机' }}
           </div>
         </div>
         <div class="metric-item">
@@ -130,11 +140,13 @@
 </template>
 
 <script setup>
-import { ref, computed, nextTick, watch } from 'vue' // ✅ 引入 watch
+import { ref, computed, nextTick, watch, onBeforeUnmount } from 'vue'
 import LaneCanvas from '../components/LaneCanvas.vue'
 import request from '../utils/request'
 
 const API_BASE_URL = 'http://127.0.0.1:8000'
+// ✅ 确保这里是你的后端真实 WS 地址
+const WS_URL = 'ws://127.0.0.1:8000/api/lane/ws/realtime'
 
 // 状态
 const inputMode = ref('local')
@@ -143,19 +155,32 @@ const isDetecting = ref(false)
 const isLoading = ref(false)
 const displayImage = ref('')
 const fileName = ref('')
+const videoFileName = ref('')
 const logs = ref([])
 const logWindow = ref(null)
 const currentFile = ref(null)
 const realLaneCount = ref(null)
+const fps = ref(0)
 
-// ✅ [新增] 参数配置对象
+// 实时流相关 Ref
+const videoElement = ref(null)
+const captureCanvas = ref(null)
+let ws = null
+let animationFrameId = null
+let lastFrameTime = 0
+
+// 参数配置
 const config = ref({
-  backbone: 'resnet18',       // 默认骨干网络
-  conf_threshold: 0.40,       // 默认置信度
-  nms_threshold: 15           // 默认 NMS 阈值
+  backbone: 'resnet18',
+  conf_threshold: 0.40,
+  nms_threshold: 15
 })
 
-// ✅ [新增] 模型与骨干网络的映射关系
+// ✅ 修改：移除了 camera 的判断，仅 video 模式且未检测时显示预览
+const showVideoPreview = computed(() => {
+  return inputMode.value === 'video' && !isDetecting.value
+})
+
 const backboneOptions = computed(() => {
   if (selectedModel.value === 'CLRNet') {
     return [
@@ -174,7 +199,6 @@ const backboneOptions = computed(() => {
   return []
 })
 
-// ✅ [新增] 监听模型切换，自动重置 backbone 为该模型的第一个选项
 watch(selectedModel, (newVal) => {
   const options = backboneOptions.value
   if (options.length > 0) {
@@ -182,17 +206,23 @@ watch(selectedModel, (newVal) => {
   }
 })
 
-const imageResolution = computed(() => displayImage.value ? '自适应' : '无')
+const imageResolution = computed(() => displayImage.value ? '原始分辨率' : '无')
 
-// ... (switchMode, resetState, handleFileUpload 方法保持不变) ...
+const shouldDisableStartButton = computed(() => {
+  if (isLoading.value) return true
+  if (inputMode.value === 'local' && !currentFile.value) return true
+  if (inputMode.value === 'video' && !videoFileName.value) return true
+  return false
+})
+
 const switchMode = (mode) => {
+  stopInference()
   inputMode.value = mode
   resetState()
-  if (mode === 'stream') {
-    addLog('系统已切换至流媒体模式 (演示)', 'info')
-  } else {
-    addLog('系统已切换至本地文件模式', 'info')
-  }
+
+  // ✅ 修改：移除了摄像头模式的判断
+  if (mode === 'video') addLog('已切换至视频文件模式', 'info')
+  else addLog('已切换至本地文件模式', 'info')
 }
 
 const resetState = () => {
@@ -200,62 +230,168 @@ const resetState = () => {
   isLoading.value = false
   displayImage.value = ''
   fileName.value = ''
+  videoFileName.value = ''
   currentFile.value = null
   realLaneCount.value = null
+  fps.value = 0
 }
 
 const handleFileUpload = (event) => {
   const file = event.target.files[0]
   if (!file) return
-
   if (displayImage.value) URL.revokeObjectURL(displayImage.value)
   displayImage.value = URL.createObjectURL(file)
   fileName.value = file.name
   currentFile.value = file
   isDetecting.value = false
   realLaneCount.value = null
-  addLog(`已加载文件: ${file.name}`, 'info')
+  addLog(`已加载图片: ${file.name}`, 'info')
 }
 
-// ... (toggleInference 方法保持不变) ...
+const handleVideoUpload = (event) => {
+  const file = event.target.files[0]
+  if (!file) return
+  videoFileName.value = file.name
+  if (videoElement.value) {
+    videoElement.value.src = URL.createObjectURL(file)
+    videoElement.value.play().catch(e => console.log('Autoplay blocked', e))
+  }
+  addLog(`已加载视频: ${file.name}`, 'info')
+}
+
+// ❌ 删除了 startCameraPreview 函数
+
 const toggleInference = () => {
   if (isDetecting.value) {
-    resetState()
-    addLog('状态已重置。', 'info')
+    stopInference()
+    addLog('推理已停止', 'warning')
     return
   }
 
   if (inputMode.value === 'local') {
-    if (!currentFile.value) {
-      addLog('错误：未选择图片文件。', 'error')
-      return
-    }
     runLocalInference()
   } else {
-    addLog('演示版本暂未实现流媒体模式推理。', 'warning')
+    runRealtimeInference()
   }
 }
 
-// ✅ [修改] runLocalInference 方法，发送新参数
-// 🚀 核心：调用 FastAPI 后端接口
+const stopInference = () => {
+  isDetecting.value = false
+  isLoading.value = false
+
+  if (ws) {
+    ws.close()
+    ws = null
+  }
+
+  if (animationFrameId) {
+    cancelAnimationFrame(animationFrameId)
+    animationFrameId = null
+  }
+
+  if (videoElement.value && inputMode.value === 'video') {
+    videoElement.value.pause()
+  }
+}
+
+const runRealtimeInference = async () => {
+  isLoading.value = true
+
+  try {
+    // ✅ 修改：移除了摄像头逻辑，只保留视频文件检查
+    if (inputMode.value === 'video') {
+      if (!videoFileName.value) throw new Error("请先上传视频文件")
+      videoElement.value.play()
+    }
+
+    ws = new WebSocket(WS_URL)
+
+    ws.onopen = () => {
+      addLog('WebSocket 连接成功', 'success')
+      isDetecting.value = true
+      isLoading.value = false
+      startFrameLoop()
+    }
+
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data)
+      if (data.status === 'success') {
+        displayImage.value = data.image
+
+        const now = performance.now()
+        if (lastFrameTime) {
+          fps.value = Math.round(1000 / (now - lastFrameTime))
+        }
+        lastFrameTime = now
+      }
+    }
+
+    ws.onerror = (e) => {
+      console.error(e)
+      addLog('WebSocket 连接错误', 'error')
+      stopInference()
+    }
+
+    ws.onclose = () => {
+      addLog('WebSocket 连接已断开', 'warning')
+      stopInference()
+    }
+
+  } catch (e) {
+    addLog(`启动失败: ${e.message}`, 'error')
+    isLoading.value = false
+    stopInference()
+  }
+}
+
+const startFrameLoop = () => {
+  if (!isDetecting.value || !ws) return
+
+  const sendFrame = () => {
+    if (ws.readyState === WebSocket.OPEN && videoElement.value) {
+      const vid = videoElement.value
+
+      if (vid.readyState >= 2 && !vid.paused && !vid.ended) {
+        const canvas = captureCanvas.value
+        const ctx = canvas.getContext('2d')
+
+        canvas.width = vid.videoWidth
+        canvas.height = vid.videoHeight
+
+        ctx.drawImage(vid, 0, 0, canvas.width, canvas.height)
+
+        const base64Data = canvas.toDataURL('image/jpeg', 0.8)
+
+        ws.send(JSON.stringify({
+          type: 'frame',
+          image: base64Data,
+          config: {
+            model: selectedModel.value,
+            backbone: config.value.backbone,
+            conf: config.value.conf_threshold,
+            nms: config.value.nms_threshold
+          }
+        }))
+      }
+    }
+    animationFrameId = requestAnimationFrame(sendFrame)
+  }
+
+  sendFrame()
+}
+
 const runLocalInference = async () => {
   isLoading.value = true
-  addLog(`正在将 ${fileName.value} 发送至 FastAPI 后端...`, 'info')
+  addLog(`正在发送至后端...`, 'info')
 
   const formData = new FormData()
   formData.append('file', currentFile.value)
   formData.append('model_name', selectedModel.value)
   formData.append('backbone', config.value.backbone);
-
-  // 界面上拖动滑块设定的置信度
   formData.append('conf_threshold', config.value.conf_threshold);
-
-  // 界面上拖动滑块设定的 NMS 阈值
   formData.append('nms_threshold', config.value.nms_threshold);
 
   try {
-    // 2. ✅ 使用 request 替代 fetch
-    // 不需要手动加 headers，request 内部会自动加 Token
     const response = await request('/api/lane/detect/image', {
       method: 'POST',
       body: formData
@@ -267,20 +403,14 @@ const runLocalInference = async () => {
     }
 
     const resJson = await response.json()
-    // ... (后续处理逻辑完全不用变)
     if (resJson.code === 200) {
-      // 成功：处理返回数据
       const resultData = resJson.data
-
-      // 拼接完整的图片 URL (FastAPI 返回的是相对路径 static/...)
       const resultUrl = `${API_BASE_URL}/${resultData.img_url}`
-
       displayImage.value = resultUrl
       realLaneCount.value = resultData.lane_count
 
       isDetecting.value = true
-      addLog(`✅ 成功！检测到 ${resultData.lane_count} 条车道线。`, 'success')
-      addLog(`可视化结果已加载: ${resultData.img_url}`, 'success')
+      addLog(`✅ 检测成功: ${resultData.lane_count} 条车道线`, 'success')
     } else {
       throw new Error(resJson.message || '未知业务错误')
     }
@@ -288,13 +418,11 @@ const runLocalInference = async () => {
   } catch (error) {
     console.error(error)
     addLog(`❌ 推理失败: ${error.message}`, 'error')
-    alert(`后端请求失败：${error.message}\n请检查后端控制台是否报错。`)
   } finally {
     isLoading.value = false
   }
 }
 
-// ... (addLog 方法保持不变) ...
 const addLog = (msg, type = 'normal') => {
   const now = new Date()
   const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`
@@ -305,16 +433,18 @@ const addLog = (msg, type = 'normal') => {
     if (logWindow.value) logWindow.value.scrollTop = 0
   })
 }
+
+onBeforeUnmount(() => {
+  stopInference()
+})
 </script>
 
 <style scoped>
-/* 核心布局 */
+/* 保持所有样式不变，确保 video-preview 等类存在 */
 .workspace {
-  /* 填满 MainLayout 给的容器 */
   height: 100%;
   display: flex;
   gap: 20px;
-  /* padding: 20px; 这一层不需要padding，MainLayout给了 */
   overflow: hidden;
 }
 
@@ -364,7 +494,6 @@ const addLog = (msg, type = 'normal') => {
   overflow-y: auto;
 }
 
-/* Controls */
 .form-group {
   margin-bottom: 20px;
 }
@@ -413,7 +542,6 @@ const addLog = (msg, type = 'normal') => {
   color: #334155;
 }
 
-/* Upload */
 .upload-zone {
   border: 2px dashed #cbd5e1;
   border-radius: 8px;
@@ -507,7 +635,6 @@ const addLog = (msg, type = 'normal') => {
   background: #dc2626;
 }
 
-/* Stage */
 .stage-center {
   flex: 1;
   display: flex;
@@ -552,7 +679,6 @@ const addLog = (msg, type = 'normal') => {
   justify-content: center;
 }
 
-/* Logs */
 .terminal-window {
   flex: 1;
   background: #ffffff;
@@ -630,5 +756,27 @@ const addLog = (msg, type = 'normal') => {
 .range-modern {
   width: 100%;
   cursor: pointer;
+}
+
+/* 关键样式保留 */
+.video-preview {
+  max-width: 100%;
+  max-height: 100%;
+  display: block;
+}
+
+.offscreen-stream {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  /* 视觉不可见 */
+  z-index: -1;
+  /* 沉底，不挡住结果层 */
+  object-fit: contain;
+  /* 保持比例 */
+  pointer-events: none;
 }
 </style>
