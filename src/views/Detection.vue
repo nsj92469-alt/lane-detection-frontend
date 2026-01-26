@@ -49,7 +49,7 @@
 
         <div class="form-group">
           <div style="display: flex; justify-content: space-between;">
-            <label class="form-label">去重距离 (NMS): {{ config.nms_threshold }} px</label>
+            <label class="form-label">NMS 阈值: {{ config.nms_threshold }}</label>
           </div>
           <input type="range" min="0" max="50" step="1" v-model.number="config.nms_threshold" class="range-modern">
         </div>
@@ -98,8 +98,11 @@
       </div>
 
       <div class="canvas-viewport">
-        <LaneCanvas v-show="!showVideoPreview" ref="laneCanvasRef" :imageSrc="displayImage" :isDetecting="isDetecting"
+        <LaneCanvas v-show="showLaneCanvas" ref="laneCanvasRef" :imageSrc="displayImage" :isDetecting="isDetecting"
           :inputMode="inputMode" :modelName="selectedModel" />
+
+        <img v-if="isDetecting && inputMode === 'video' && displayImage" :src="displayImage"
+          class="result-stream-img" />
 
         <video ref="videoElement" :class="showVideoPreview ? 'video-preview' : 'offscreen-stream'" autoplay playsinline
           muted loop></video>
@@ -145,7 +148,6 @@ import LaneCanvas from '../components/LaneCanvas.vue'
 import request from '../utils/request'
 
 const API_BASE_URL = 'http://127.0.0.1:8000'
-// ✅ 确保这里是你的后端真实 WS 地址
 const WS_URL = 'ws://127.0.0.1:8000/api/lane/ws/realtime'
 
 // 状态
@@ -168,17 +170,23 @@ const captureCanvas = ref(null)
 let ws = null
 let animationFrameId = null
 let lastFrameTime = 0
+// ✅ 新增：流控标志位，防止前端发送过快
+let isPendingResponse = false
 
-// 参数配置
 const config = ref({
   backbone: 'resnet18',
   conf_threshold: 0.40,
   nms_threshold: 15
 })
 
-// ✅ 修改：移除了 camera 的判断，仅 video 模式且未检测时显示预览
 const showVideoPreview = computed(() => {
-  return inputMode.value === 'video' && !isDetecting.value
+  return inputMode.value === 'video' && !isDetecting.value && !!videoFileName.value
+})
+
+const showLaneCanvas = computed(() => {
+  if (inputMode.value === 'local') return true
+  if (isDetecting.value) return true
+  return !videoFileName.value
 })
 
 const backboneOptions = computed(() => {
@@ -219,8 +227,6 @@ const switchMode = (mode) => {
   stopInference()
   inputMode.value = mode
   resetState()
-
-  // ✅ 修改：移除了摄像头模式的判断
   if (mode === 'video') addLog('已切换至视频文件模式', 'info')
   else addLog('已切换至本地文件模式', 'info')
 }
@@ -259,52 +265,43 @@ const handleVideoUpload = (event) => {
   addLog(`已加载视频: ${file.name}`, 'info')
 }
 
-// ❌ 删除了 startCameraPreview 函数
-
 const toggleInference = () => {
   if (isDetecting.value) {
     stopInference()
     addLog('推理已停止', 'warning')
     return
   }
-
-  if (inputMode.value === 'local') {
-    runLocalInference()
-  } else {
-    runRealtimeInference()
-  }
+  if (inputMode.value === 'local') runLocalInference()
+  else runRealtimeInference()
 }
 
 const stopInference = () => {
   isDetecting.value = false
   isLoading.value = false
-
   if (ws) {
     ws.close()
     ws = null
   }
-
   if (animationFrameId) {
     cancelAnimationFrame(animationFrameId)
     animationFrameId = null
   }
-
   if (videoElement.value && inputMode.value === 'video') {
     videoElement.value.pause()
   }
+  isPendingResponse = false // 重置标志位
 }
 
 const runRealtimeInference = async () => {
   isLoading.value = true
-
   try {
-    // ✅ 修改：移除了摄像头逻辑，只保留视频文件检查
     if (inputMode.value === 'video') {
       if (!videoFileName.value) throw new Error("请先上传视频文件")
       videoElement.value.play()
     }
 
     ws = new WebSocket(WS_URL)
+    isPendingResponse = false // 初始化状态
 
     ws.onopen = () => {
       addLog('WebSocket 连接成功', 'success')
@@ -314,10 +311,12 @@ const runRealtimeInference = async () => {
     }
 
     ws.onmessage = (event) => {
+      // ✅ 关键：收到结果，解除锁定，允许发送下一帧
+      isPendingResponse = false
+
       const data = JSON.parse(event.data)
       if (data.status === 'success') {
         displayImage.value = data.image
-
         const now = performance.now()
         if (lastFrameTime) {
           fps.value = Math.round(1000 / (now - lastFrameTime))
@@ -336,7 +335,6 @@ const runRealtimeInference = async () => {
       addLog('WebSocket 连接已断开', 'warning')
       stopInference()
     }
-
   } catch (e) {
     addLog(`启动失败: ${e.message}`, 'error')
     isLoading.value = false
@@ -344,11 +342,15 @@ const runRealtimeInference = async () => {
   }
 }
 
+// 🔄 优化后的循环：带流控 (Flow Control)
 const startFrameLoop = () => {
   if (!isDetecting.value || !ws) return
 
   const sendFrame = () => {
-    if (ws.readyState === WebSocket.OPEN && videoElement.value) {
+    // ✅ 核心优化：
+    // 只有当 ws 连接正常，且【上一帧已返回】(isPendingResponse === false) 时才发送
+    // 这能确保前端发送速率与后端处理能力自动同步
+    if (!isPendingResponse && ws.readyState === WebSocket.OPEN && videoElement.value) {
       const vid = videoElement.value
 
       if (vid.readyState >= 2 && !vid.paused && !vid.ended) {
@@ -360,7 +362,11 @@ const startFrameLoop = () => {
 
         ctx.drawImage(vid, 0, 0, canvas.width, canvas.height)
 
-        const base64Data = canvas.toDataURL('image/jpeg', 0.8)
+        // 使用 0.5 质量压缩，平衡速度与画质
+        const base64Data = canvas.toDataURL('image/jpeg', 0.5)
+
+        // 🔒 发送前加锁
+        isPendingResponse = true
 
         ws.send(JSON.stringify({
           type: 'frame',
@@ -374,6 +380,7 @@ const startFrameLoop = () => {
         }))
       }
     }
+    // 继续循环，但不一定发送
     animationFrameId = requestAnimationFrame(sendFrame)
   }
 
@@ -440,7 +447,7 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-/* 保持所有样式不变，确保 video-preview 等类存在 */
+/* 保持原有样式 */
 .workspace {
   height: 100%;
   display: flex;
@@ -759,10 +766,21 @@ onBeforeUnmount(() => {
 }
 
 /* 关键样式保留 */
+.result-stream-img {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  z-index: 10;
+}
+
 .video-preview {
   max-width: 100%;
   max-height: 100%;
   display: block;
+  z-index: 5;
 }
 
 .offscreen-stream {
@@ -772,11 +790,7 @@ onBeforeUnmount(() => {
   width: 100%;
   height: 100%;
   opacity: 0;
-  /* 视觉不可见 */
-  z-index: -1;
-  /* 沉底，不挡住结果层 */
-  object-fit: contain;
-  /* 保持比例 */
   pointer-events: none;
+  z-index: -1;
 }
 </style>

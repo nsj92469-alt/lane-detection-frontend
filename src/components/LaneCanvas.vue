@@ -1,13 +1,11 @@
 <template>
-  <div class="canvas-container">
+  <div class="canvas-container" :class="{ 'transparent-bg': inputMode === 'video' && !imageSrc }">
 
-    <img v-if="inputMode === 'local' && imageSrc" ref="imgRef" :src="imageSrc" class="layer-source" />
+    <img v-if="imageSrc" ref="imgRef" :src="imageSrc" class="layer-source" />
 
-    <div v-if="inputMode === 'stream'" class="stream-placeholder">
-      <div class="placeholder-content">
-        <div class="icon">📹</div>
-        <p>实时流模式开发中...</p>
-      </div>
+    <div v-if="inputMode === 'video' && !imageSrc && !isDetecting" class="placeholder-box">
+      <div class="icon">📹</div>
+      <p>请上传本地视频进行检测</p>
     </div>
 
     <div v-if="inputMode === 'local' && !imageSrc" class="placeholder-box">
@@ -22,16 +20,13 @@
 import { ref } from 'vue'
 
 const props = defineProps({
-  imageSrc: String,      // 图片路径 (预览图 or 结果图)
-  isDetecting: Boolean,  // 是否检测完成
-  inputMode: String,     // 'local' | 'stream'
-  modelName: String      // 当前选择的模型名称
+  imageSrc: String,      // 图片路径
+  isDetecting: Boolean,  // 是否检测中
+  inputMode: String,     // 'local' | 'video'
+  modelName: String      // 模型名称
 })
 
 const imgRef = ref(null)
-
-// 之前的模拟绘制逻辑全部删除
-// 现在我们完全信任后端返回的静态图片 (imageSrc)
 </script>
 
 <style scoped>
@@ -39,13 +34,19 @@ const imgRef = ref(null)
   position: relative;
   width: 100%;
   height: 100%;
-  /* 保持背景透明或微深色，视个人喜好 */
-  background-color: #1e1e1e;
+  /* background-color: #1e1e1e; */
   display: flex;
   justify-content: center;
   align-items: center;
   overflow: hidden;
   border-radius: 8px;
+  transition: background-color 0.3s;
+}
+
+/* 视频预览时背景透明 */
+.canvas-container.transparent-bg {
+  background-color: transparent;
+  pointer-events: none;
 }
 
 .layer-source {
@@ -53,33 +54,17 @@ const imgRef = ref(null)
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
-  /* 保持图片比例 */
-  z-index: 1;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  z-index: 10;
 }
 
-/* 视频流占位层 */
-.stream-placeholder {
-  width: 100%;
-  height: 100%;
-  background: radial-gradient(circle, #222 0%, #000 100%);
+.placeholder-box {
   position: absolute;
-  top: 0;
-  left: 0;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  z-index: 0;
-}
-
-.placeholder-box,
-.placeholder-content {
-  position: absolute;
-  z-index: 3;
+  z-index: 5;
   color: #666;
   text-align: center;
   pointer-events: none;
-  /* 让点击穿透，方便触发上传 */
+  padding: 20px;
+  border-radius: 12px;
 }
 
 .icon {
